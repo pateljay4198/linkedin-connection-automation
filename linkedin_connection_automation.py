@@ -10,8 +10,10 @@ def human_delay(min_sec=2, max_sec=5):
     """Randomize wait times to avoid statistical detection"""
     time.sleep(random.uniform(min_sec, max_sec))
 
-def automate_connections_only(search_url, max_pages=3):
+def automate_connections_only(search_url, target_invites, max_pages=50):
     os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
+    
+    successful_invites = 0
 
     with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(
@@ -44,17 +46,19 @@ def automate_connections_only(search_url, max_pages=3):
             context.storage_state(path=SESSION_FILE)
             print(f"Session saved to {SESSION_FILE}!")
         
-        # 3. Initial Navigation
-        print(f"Navigating to search URL: {search_url}")
+        print(f"Navigating to search URL...")
         page.goto(search_url)
         page.wait_for_load_state("domcontentloaded")
         human_delay(3, 5)
                 
-        # --- NEW: OUTER LOOP FOR PAGINATION ---
+        # --- OUTER LOOP FOR PAGINATION ---
         for current_page in range(1, max_pages + 1):
+            
+            if successful_invites >= target_invites:
+                break
+                
             print(f"\n========== PROCESSING PAGE {current_page} ==========")
             
-            # Scroll down in small increments to force LinkedIn to load the buttons
             print("Scrolling to load dynamic profiles...")
             for _ in range(4):
                 try:
@@ -62,11 +66,16 @@ def automate_connections_only(search_url, max_pages=3):
                 except Exception:
                     pass 
                 human_delay(1, 2)
-                
+            
             print("Waiting for 'Connect' buttons to appear...")
             
-            # Target main feed only
-            locator_string = "main a[aria-label*='to connect'], main button[aria-label*='to connect']"
+            # ULTRA-BROAD LOCATOR: Looks anywhere on the page for links or buttons containing 'to connect' 
+            # or exact text 'Connect' (case-insensitive)
+            locator_string = (
+                "a[aria-label*='to connect' i], "
+                "button[aria-label*='to connect' i], "
+                "button:has-text('Connect')"
+            )
             
             try:
                 page.wait_for_selector(locator_string, timeout=7000)
@@ -78,8 +87,13 @@ def automate_connections_only(search_url, max_pages=3):
             
             print(f"Found {total_buttons} 'Connect' buttons on Page {current_page}.")
             
-            # Process connections on the current page
+            # --- INNER LOOP FOR PROFILES ---
+            # Added min(total_buttons, 10) back so we only process the main feed and ignore the footer
             for i in range(min(total_buttons, 10)):
+                
+                if successful_invites >= target_invites:
+                    break
+                    
                 try:
                     button = page.locator(locator_string).nth(i)
                     
@@ -88,14 +102,15 @@ def automate_connections_only(search_url, max_pages=3):
                     
                     if button.is_visible():
                         button.click(force=True)
-                        print(f"Clicked 'Connect' on profile {i+1}")
                         human_delay(2, 3)
                         
                         send_button = page.locator("[aria-label='Send without a note'], button:has-text('Send')").first
                         
                         if send_button.is_visible(timeout=5000):
-                            send_button.click() # <--- UNCOMMENT TO ACTUALLY SEND THE INVITE
-                            print(f"--> Invite ready for profile {i+1}")
+                            send_button.click() # <--- ACTUALLY SENDS THE REQUEST
+                            
+                            successful_invites += 1
+                            print(f"--> Invite sent to profile {i+1} | Total Successful: {successful_invites}/{target_invites}")
                             
                             page.keyboard.press("Escape")
                             human_delay(1, 2)
@@ -103,37 +118,55 @@ def automate_connections_only(search_url, max_pages=3):
                             print(f"--> Blocked by privacy settings. Skipping.")
                             page.keyboard.press("Escape")
                             human_delay(1, 2)
-                    
+                            
                 except Exception as e:
                     print(f"Skipping profile {i+1} due to UI interruption.")
                     page.keyboard.press("Escape") 
                     human_delay(1, 2)
             
-            # --- PAGINATION LOGIC (Move to Next Page) ---
+            # End of page check before clicking "Next"
+            if successful_invites >= target_invites:
+                print(f"\n✅ Target of {target_invites} successful invites reached! Stopping this search.")
+                break
+                
+            # --- PAGINATION LOGIC ---
             if current_page < max_pages:
                 print("\nScrolling to the bottom to find the 'Next' page button...")
-                
-                # Jump to the very bottom to reveal the pagination menu
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 human_delay(2, 4)
                 
-                # Look for the 'Next' button
                 next_button = page.locator("button[aria-label='Next'], button:has-text('Next')").first
                 
                 if next_button.is_visible() and not next_button.is_disabled():
                     print(f"Clicking 'Next' to go to Page {current_page + 1}...")
                     next_button.click()
-                    
-                    # Wait for the next page of results to load
                     page.wait_for_load_state("domcontentloaded")
                     human_delay(3, 5)
                 else:
                     print("No more pages found, or 'Next' button is disabled. Finishing up.")
-                    break # Break out of the outer loop if we've hit the end of the search results
+                    break 
 
-        print("\nAutomation run complete.")
+        print(f"\nAutomation run complete for this target. Total sent: {successful_invites}/{target_invites}")
         browser.close()
 
 if __name__ == "__main__":
-    search_url = "https://www.linkedin.com/search/results/people/?keywords=AI%20Engineer"
-    automate_connections_only(search_url, max_pages=10)
+    search_targets = [
+        {
+            "category_name": "AI Leaders & Data Managers",
+            "url": "https://www.linkedin.com/search/results/people/?keywords=(%22Lead%20AI%20Engineer%22%20OR%20%22Senior%20AI%20Engineer%22%20OR%20%22Head%20of%20AI%22%20OR%20%22Director%20of%20Data%20%26%20AI%22%20OR%20%22Data%20Platform%20Manager%22%20OR%20%22AI%20Architect%22)",            "target_count": 80
+        },
+        {
+            "category_name": "Tech Recruiters & HR",
+            "url": "https://www.linkedin.com/search/results/people/?keywords=(%22Talent%20Acquisition%22%20OR%20%22Technical%20Recruiter%22%20OR%20%22HR%22)%20AND%20(%22AI%22%20OR%20%22Data%22%20OR%20%22Cloud%22)",
+            "target_count": 20
+        }
+    ]
+    
+    for i, target in enumerate(search_targets):
+        print(f"\n\n*** STARTING NEW SEARCH: {target['category_name']} ***")
+        
+        automate_connections_only(target['url'], target_invites=target['target_count'], max_pages=50)
+        
+        if i < len(search_targets) - 1:
+            print("Taking a 2-minute break before the next category...")
+            time.sleep(120)
